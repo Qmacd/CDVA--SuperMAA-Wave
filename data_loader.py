@@ -1,10 +1,4 @@
-﻿#!/usr/bin/env python3
-"""
-Wave MAA Data Loader - Enhanced Version
-Based on successful running code, optimized data processing logic
-"""
-
-import pandas as pd
+﻿import pandas as pd
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -21,7 +15,7 @@ class WaveMAA_Dataset(Dataset):
     """
     
     def __init__(self, features, cd1_labels, cd2_labels, cd3_labels, va_labels,
-                 cd1_lengths, cd2_lengths, cd3_lengths, va_lengths):
+                 cd1_lengths, cd2_lengths, cd3_lengths, va_lengths, timestamps=None, close_prices=None):
         """
         Initialize dataset
         
@@ -35,6 +29,8 @@ class WaveMAA_Dataset(Dataset):
             cd2_lengths: CD2 fish body lengths (N,)
             cd3_lengths: CD3 fish body lengths (N,)
             va_lengths: VA fish body lengths (N,)
+            timestamps: Timestamp information for each sample (N,)
+            close_prices: Close price for each sample (N,)
         """
         self.features = torch.FloatTensor(features)
         self.cd1_labels = torch.LongTensor(cd1_labels)
@@ -45,6 +41,8 @@ class WaveMAA_Dataset(Dataset):
         self.cd2_lengths = torch.FloatTensor(cd2_lengths)
         self.cd3_lengths = torch.FloatTensor(cd3_lengths)
         self.va_lengths = torch.FloatTensor(va_lengths)
+        self.timestamps = timestamps  # 保存时间戳信息
+        self.close_prices = close_prices  # 保存收盘价信息
         
         assert len(self.features) == len(self.cd1_labels) == len(self.cd2_labels) == len(self.cd3_labels) == len(self.va_labels)
     
@@ -52,7 +50,7 @@ class WaveMAA_Dataset(Dataset):
         return len(self.features)
     
     def __getitem__(self, idx):
-        return {
+        item = {
             'features': self.features[idx],
             'cd1_label': self.cd1_labels[idx],
             'cd2_label': self.cd2_labels[idx],
@@ -63,6 +61,20 @@ class WaveMAA_Dataset(Dataset):
             'cd3_length': self.cd3_lengths[idx],
             'va_length': self.va_lengths[idx]
         }
+        
+        # 添加时间戳信息（转换为字符串格式）
+        if self.timestamps is not None and idx < len(self.timestamps):
+            timestamp = self.timestamps[idx]
+            if hasattr(timestamp, 'strftime'):  # 如果是pandas Timestamp或datetime对象
+                item['timestamp'] = timestamp.strftime('%Y-%m-%d')
+            else:
+                item['timestamp'] = str(timestamp)
+        
+        # 添加收盘价信息
+        if self.close_prices is not None and idx < len(self.close_prices):
+            item['close_price'] = self.close_prices[idx]
+        
+        return item
 
 def detect_data_format(data_path):
     """
@@ -246,6 +258,8 @@ def create_sliding_windows(data, window_size=20):
     labels = {
         'cd1': [], 'cd2': [], 'cd3': [], 'va': []
     }
+    timestamps = []  # 收集时间戳信息
+    close_prices = []  # 收集收盘价信息
     
     feature_cols = ['open', 'high', 'low', 'close', 'ema5', 'ema10', 'ema20', 'ema30', 'ema60', 'ema120']
     
@@ -269,6 +283,20 @@ def create_sliding_windows(data, window_size=20):
         labels['cd2'].append(cd2_labels[i])
         labels['cd3'].append(cd3_labels[i])
         labels['va'].append(va_labels[i])
+        
+        # 收集对应的时间戳（窗口结束时间）
+        if 'timestamp' in data.columns:
+            timestamps.append(data['timestamp'].iloc[i])
+        else:
+            # 如果没有时间戳，使用索引作为时间标识
+            timestamps.append(f"sample_{i}")
+        
+        # 收集对应的收盘价（窗口结束时间）
+        if 'close' in data.columns:
+            close_prices.append(data['close'].iloc[i])
+        else:
+            # 如果没有收盘价，使用0作为默认值
+            close_prices.append(0.0)
     
     print(f" Created sliding windows with unified timestamps")
     print(f"   Features used: {available_cols}")
@@ -277,7 +305,7 @@ def create_sliding_windows(data, window_size=20):
         window_end_date = data['timestamp'].iloc[-1] if len(data) > 0 else "N/A"
         print(f"   Window date range: {window_start_date.strftime('%Y-%m-%d')} to {window_end_date.strftime('%Y-%m-%d')}")
     
-    return np.array(features), labels, available_cols
+    return np.array(features), labels, available_cols, timestamps, close_prices
 
 def generate_fish_lengths(labels, task_type):
     """
@@ -541,7 +569,7 @@ def load_wave_maa_data(data_path='.', window_size=20, test_split=0.15, val_split
     print(f" Data merging successful with unified timestamps!")
     
     print(f" Creating sliding windows, window size: {window_size}")
-    features, labels, feature_columns = create_sliding_windows(combined_data, window_size)
+    features, labels, feature_columns, timestamps, close_prices = create_sliding_windows(combined_data, window_size)
     
     print(f" Created {len(features)} time windows")
     print(f"   Feature shape: {features.shape}")
@@ -603,6 +631,16 @@ def load_wave_maa_data(data_path='.', window_size=20, test_split=0.15, val_split
     test_cd3_lengths = cd3_lengths[train_size + val_size:]
     test_va_lengths = va_lengths[train_size + val_size:]
     
+    # 分割时间戳
+    train_timestamps = timestamps[:train_size]
+    val_timestamps = timestamps[train_size:train_size + val_size]
+    test_timestamps = timestamps[train_size + val_size:]
+    
+    # 分割收盘价
+    train_close_prices = close_prices[:train_size]
+    val_close_prices = close_prices[train_size:train_size + val_size]
+    test_close_prices = close_prices[train_size + val_size:]
+    
     print(" Data splitting:")
     print(f"   Training set: {len(train_features)} samples")
     print(f"   Validation set: {len(val_features)} samples")
@@ -616,17 +654,17 @@ def load_wave_maa_data(data_path='.', window_size=20, test_split=0.15, val_split
     
     train_dataset = WaveMAA_Dataset(
         train_features, train_labels['cd1'], train_labels['cd2'], train_labels['cd3'], train_labels['va'],
-        train_cd1_lengths, train_cd2_lengths, train_cd3_lengths, train_va_lengths
+        train_cd1_lengths, train_cd2_lengths, train_cd3_lengths, train_va_lengths, train_timestamps, train_close_prices
     )
     
     val_dataset = WaveMAA_Dataset(
         val_features, val_labels['cd1'], val_labels['cd2'], val_labels['cd3'], val_labels['va'],
-        val_cd1_lengths, val_cd2_lengths, val_cd3_lengths, val_va_lengths
+        val_cd1_lengths, val_cd2_lengths, val_cd3_lengths, val_va_lengths, val_timestamps, val_close_prices
     )
     
     test_dataset = WaveMAA_Dataset(
-        test_features, test_labels['cd1'], test_labels['cd2'], test_labels['cd3'], val_labels['va'],
-        test_cd1_lengths, test_cd2_lengths, test_cd3_lengths, test_va_lengths
+        test_features, test_labels['cd1'], test_labels['cd2'], test_labels['cd3'], test_labels['va'],
+        test_cd1_lengths, test_cd2_lengths, test_cd3_lengths, test_va_lengths, test_timestamps, test_close_prices
     )
     
     print(f" All datasets created successfully with consistent dimensions")

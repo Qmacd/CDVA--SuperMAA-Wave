@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, mean_absolute_error
 from tqdm import tqdm
+import pandas as pd
 
 class ModelEvaluator:
     """Model evaluator for generating CSV results"""
@@ -26,6 +27,8 @@ class ModelEvaluator:
         task_labels = {'cd1': [], 'cd2': [], 'cd3': [], 'va': []}
         length_predictions = {'cd1': [], 'cd2': [], 'cd3': [], 'va': []}
         length_labels = {'cd1': [], 'cd2': [], 'cd3': [], 'va': []}
+        timestamps = []  # 收集时间戳信息
+        close_prices = []  # 收集收盘价信息
         
         with torch.no_grad():
             for batch in tqdm(test_loader, desc=f"Evaluating {self.model_name}"):
@@ -40,6 +43,30 @@ class ModelEvaluator:
                 cd2_lengths = batch['cd2_length'].cpu().numpy()
                 cd3_lengths = batch['cd3_length'].cpu().numpy()
                 va_lengths = batch['va_length'].cpu().numpy()
+                
+                # 收集时间戳信息
+                if 'timestamp' in batch:
+                    batch_timestamps = batch['timestamp']
+                    if isinstance(batch_timestamps, list):
+                        timestamps.extend(batch_timestamps)
+                    else:
+                        timestamps.extend([str(ts) for ts in batch_timestamps])
+                else:
+                    # 如果没有时间戳，使用批次索引
+                    batch_size = features.shape[0]
+                    timestamps.extend([f"sample_{i}" for i in range(len(timestamps), len(timestamps) + batch_size)])
+                
+                # 收集收盘价信息
+                if 'close_price' in batch:
+                    batch_close_prices = batch['close_price']
+                    if isinstance(batch_close_prices, torch.Tensor):
+                        close_prices.extend(batch_close_prices.cpu().numpy())
+                    else:
+                        close_prices.extend(batch_close_prices)
+                else:
+                    # 如果没有收盘价，使用0作为默认值
+                    batch_size = features.shape[0]
+                    close_prices.extend([0.0] * batch_size)
                 
                 outputs = self.model(features)
                 
@@ -122,5 +149,36 @@ class ModelEvaluator:
                 
                 print(f"   {task.upper()}: Acc={acc:.4f}, F1={f1:.4f}, S_Acc={s_acc:.4f}, L_Acc={l_acc:.4f}, MAE={length_mae:.4f}")
         
+        # 收集所有样本的预测和真实标签（包括长度、时间戳和收盘价）
+        all_records = []
+        for task in ['cd1', 'cd2', 'cd3', 'va']:
+            n = min(len(task_labels[task]), len(task_predictions[task]), len(length_labels[task]), len(length_predictions[task]))
+            for i in range(n):
+                record = {
+                    'Task': task,
+                    'True': task_labels[task][i],
+                    'Pred': task_predictions[task][i],
+                    'True_Length': length_labels[task][i],
+                    'Pred_Length': length_predictions[task][i]
+                }
+                
+                # 添加时间戳信息
+                if i < len(timestamps):
+                    record['Timestamp'] = timestamps[i]
+                else:
+                    record['Timestamp'] = f"sample_{i}"
+                
+                # 添加收盘价信息
+                if i < len(close_prices):
+                    record['Close_Price'] = close_prices[i]
+                else:
+                    record['Close_Price'] = 0.0
+                
+                all_records.append(record)
+
+        df = pd.DataFrame(all_records)
+        df.to_csv(f"{self.model_name}_sample_predictions.csv", index=False)
+        print(f"每个样本的预测结果已保存到: {self.model_name}_sample_predictions.csv")
+
         return results
 
